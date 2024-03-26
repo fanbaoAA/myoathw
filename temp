@@ -1,0 +1,130 @@
+(* Compiler Invariants
+
+   The LLVM IR type of a variable (whether global or local) that stores an Oat
+   array value (or any other reference type, like "string") will always be a
+   double pointer.  In general, any Oat variable of Oat-type t will be
+   represented by an LLVM IR value of type Ptr (cmp_ty t).  So the Oat variable
+   x : int will be represented by an LLVM IR value of type i64*, y : string will
+   be represented by a value of type i8**, and arr : int[] will be represented
+   by a value of type {i64, [0 x i64]}**.  Whether the LLVM IR type is a
+   "single" or "double" pointer depends on whether t is a reference type.
+
+   We can think of the compiler as paying careful attention to whether a piece
+   of Oat syntax denotes the "value" of an expression or a pointer to the
+   "storage space associated with it".  This is the distinction between an
+   "expression" and the "left-hand-side" of an assignment statement.  Compiling
+   an Oat variable identifier as an expression ("value") does the load, so
+   cmp_exp called on an Oat variable of type t returns (code that) generates a
+   LLVM IR value of type cmp_ty t.  Compiling an identifier as a left-hand-side
+   does not do the load, so cmp_lhs called on an Oat variable of type t returns
+   and operand of type (cmp_ty t)*.  Extending these invariants to account for
+   array accesses: the assignment e1[e2] = e3; treats e1[e2] as a
+   left-hand-side, so we compile it as follows: compile e1 as an expression to
+   obtain an array value (which is of pointer of type {i64, [0 x s]}* ).
+   compile e2 as an expression to obtain an operand of type i64, generate code
+   that uses getelementptr to compute the offset from the array value, which is
+   a pointer to the "storage space associated with e1[e2]".
+
+   On the other hand, compiling e1[e2] as an expression (to obtain the value of
+   the array), we can simply compile e1[e2] as a left-hand-side and then do the
+   load.  So cmp_exp and cmp_lhs are mutually recursive.  [[Actually, as I am
+   writing this, I think it could make sense to factor the Oat grammar in this
+   way, which would make things clearerhw, I may do that for next time around.]]
+
+ 
+   Consider globals7.oat (in hw4programs)
+
+   /--------------- globals7.oat ------------------ 
+   global arr = int[] null;
+
+   int foo() { 
+     var x = new int[3]; 
+     arr = x; 
+     x[2] = 3; 
+     return arr[2]; 
+   }
+   /------------------------------------------------
+
+   The translation (given by cmp_ty) of the type int[] is {i64, [0 x i64}* so
+   the corresponding LLVM IR declaration will look like:
+
+   @arr = global { i64, [0 x i64] }* null
+
+   This means that the type of the LLVM IR identifier @arr is {i64, [0 x i64]}**
+   which is consistent with the type of a locally-declared array variable.
+
+   The local variable x would be allocated and initialized by (something like)
+   the following code snippet.  Here %_x7 is the LLVM IR uid containing the
+   pointer to the "storage space" for the Oat variable x.
+
+   %_x7 = alloca { i64, [0 x i64] }*                              ;; (1)
+   %_raw_array5 = call i64*  @oat_alloc_array(i64 3)              ;; (2)
+   %_array6 = bitcast i64* %_raw_array5 to { i64, [0 x i64] }*    ;; (3)
+   store { i64, [0 x i64]}* %_array6, { i64, [0 x i64] }** %_x7   ;; (4)
+
+   (1) note that alloca uses cmp_ty (int[]) to find the type, so %_x7 has 
+       the same type as @arr 
+
+   (2) @oat_alloc_array allocates len+1 i64's 
+
+   (3) we have to bitcast the result of @oat_alloc_array so we can store it
+        in %_x7 
+
+   (4) stores the resulting array value (itself a pointer) into %_x7 
+
+  The assignment arr = x; gets compiled to (something like):
+
+  %_x8 = load { i64, [0 x i64] }*, { i64, [0 x i64] }** %_x7     ;; (5)
+  store {i64, [0 x i64] }* %_x8, { i64, [0 x i64] }** @arr       ;; (6)
+
+  (5) load the array value (a pointer) that is stored in the address pointed 
+      to by %_x7 
+
+  (6) store the array value (a pointer) into @arr 
+
+  The assignment x[2] = 3; gets compiled to (something like):
+
+  %_x9 = load { i64, [0 x i64] }*, { i64, [0 x i64] }** %_x7      ;; (7)
+  %_index_ptr11 = getelementptr { i64, [0 x  i64] }, 
+                  { i64, [0 x i64] }* %_x9, i32 0, i32 1, i32 2   ;; (8)
+  store i64 3, i64* %_index_ptr11                                 ;; (9)
+
+  (7) as above, load the array value that is stored %_x7 
+
+  (8) calculate the offset from the array using GEP
+
+  (9) store 3 into the array
+
+  Finally, return arr[2]; gets compiled to (something like) the following.
+  Note that the way arr is treated is identical to x.  (Once we set up the
+  translation, there is no difference between Oat globals and locals, except
+  how their storage space is initially allocated.)
+
+  %_arr12 = load { i64, [0 x i64] }*, { i64, [0 x i64] }** @arr    ;; (10)
+  %_index_ptr14 = getelementptr { i64, [0 x i64] },                
+                 { i64, [0 x i64] }* %_arr12, i32 0, i32 1, i32 2  ;; (11)
+  %_index15 = load i64, i64* %_index_ptr14                         ;; (12)
+  ret i64 %_index15
+
+  (10) just like for %_x9, load the array value that is stored in @arr 
+
+  (11)  calculate the array index offset
+
+  (12) load the array value at the index 
+
+*)
+
+(* Global initialized arrays:
+
+  There is another wrinkle: to compile global initialized arrays like in the
+  globals4.oat, it is helpful to do a bitcast once at the global scope to
+  convert the "precise type" required by the LLVM initializer to the actual
+  translation type (which sets the array length to 0).  So for globals4.oat,
+  the arr global would compile to (something like):
+
+  @arr = global { i64, [0 x i64] }* bitcast 
+           ({ i64, [4 x i64] }* @_global_arr5 to { i64, [0 x i64] }* ) 
+  @_global_arr5 = global { i64, [4 x i64] } 
+                  { i64 4, [4 x i64] [ i64 1, i64 2, i64 3, i64 4 ] }
+
+*) 

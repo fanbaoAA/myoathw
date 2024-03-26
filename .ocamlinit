@@ -1,0 +1,23 @@
+#directory "_build";;
+
+#require "str";;
+#require "unix";;
+
+#use "topfind";;
+
+#use_output "dune top"
+
+#mod_use "lib/x86/x86.ml"
+#mod_use "lib/util/assert.ml"
+#mod_use "lib/util/platform.ml"
+#mod_use "lib/ll/ll.ml";;
+#mod_use "lib/ll/llutil.ml";;
+#mod_use "lib/ll/llinterp.ml";;
+#mod_use "bin/ast.ml"
+#mod_use "bin/astlib.ml"
+#mod_use "bin/backend.ml";;
+#mod_use "bin/frontend.ml";;
+#mod_use "test/studenttests.ml";;
+open Backend;;
+open Frontend;;
+open Studenttests;;
